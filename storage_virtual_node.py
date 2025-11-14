@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
 from enum import Enum, auto
 import hashlib
+import threading
 
 class TransferStatus(Enum):
     PENDING = auto()
@@ -26,19 +27,26 @@ class FileTransfer:
     total_size: int  # in bytes
     chunks: List[FileChunk]
     status: TransferStatus = TransferStatus.PENDING
-    created_at: float = time.time()
+    created_at: float = None
     completed_at: Optional[float] = None
+    replication_targets: Optional[List[str]] = None  # nodes storing replicas
+
+    def __post_init__(self):
+        if self.created_at is None:
+            self.created_at = time.time()
 
 class StorageVirtualNode:
     def __init__(
         self,
         node_id: str,
+        ip_address: str,
         cpu_capacity: int,  # in vCPUs
         memory_capacity: int,  # in GB
         storage_capacity: int,  # in GB
         bandwidth: int  # in Mbps
     ):
         self.node_id = node_id
+        self.ip_address = ip_address
         self.cpu_capacity = cpu_capacity
         self.memory_capacity = memory_capacity
         self.total_storage = storage_capacity * 1024 * 1024 * 1024  # Convert GB to bytes
@@ -48,7 +56,7 @@ class StorageVirtualNode:
         self.used_storage = 0
         self.active_transfers: Dict[str, FileTransfer] = {}
         self.stored_files: Dict[str, FileTransfer] = {}
-        self.network_utilization = 0  # Current bandwidth usage
+        self.network_utilization = 0.0  # Current bandwidth usage
         
         # Performance metrics
         self.total_requests_processed = 0
@@ -58,9 +66,20 @@ class StorageVirtualNode:
         # Network connections (node_id: bandwidth_available)
         self.connections: Dict[str, int] = {}
 
-    def add_connection(self, node_id: str, bandwidth: int):
+        # Node state
+        self.alive = True
+
+        # Lock for thread-safety of updates in single-process simulation
+        self._lock = threading.Lock()
+
+        def set_alive(self, alive: bool):
+         with self._lock:
+            self.alive = alive
+
+    def add_connection(self, node_id: str, bandwidth_mbps: int):
         """Add a network connection to another node"""
-        self.connections[node_id] = bandwidth * 1000000  # Store in bits per second
+        with self._lock:
+         self.connections[node_id] = bandwidth_mbps * 1000000  # Store in bits per second
 
     def _calculate_chunk_size(self, file_size: int) -> int:
         """Determine optimal chunk size based on file size"""
@@ -95,12 +114,14 @@ class StorageVirtualNode:
         file_id: str,
         file_name: str,
         file_size: int,
-        source_node: Optional[str] = None
+        source_node: Optional[str] = None,
+        replication_targets: Optional[List[str]] = None
     ) -> Optional[FileTransfer]:
-        """Initiate a file storage request to this node"""
-        # Check if we have enough storage space
-        if self.used_storage + file_size > self.total_storage:
-            return None
+        """Create a transfer request at this node (reserve space, create record)."""
+        with self._lock:
+            #Check space (for tthe base copy)
+            if self.used_storage + file_size > self.total_storage:
+                return None
         
         # Create file transfer record
         chunks = self._generate_chunks(file_id, file_size)
@@ -108,7 +129,8 @@ class StorageVirtualNode:
             file_id=file_id,
             file_name=file_name,
             total_size=file_size,
-            chunks=chunks
+            chunks=chunks,
+            replication_targets=replication_targets or []
         )
         
         self.active_transfers[file_id] = transfer
@@ -121,42 +143,58 @@ class StorageVirtualNode:
         source_node: str
     ) -> bool:
         """Process an incoming file chunk"""
+        with self.lock:
+            if not self.alive:
+                #Node dead / unavailable
+                self.failed_transfers += 1
+                return False
+            
         if file_id not in self.active_transfers:
             return False
         
         transfer = self.active_transfers[file_id]
-        
-        try:
-            chunk = next(c for c in transfer.chunks if c.chunk_id == chunk_id)
-        except StopIteration:
-            return False
+
+        #find chunk
+        chunk = None 
+        for c in transfer.chunks:
+            if c.chunk_id == chunk_id:
+                chunk = c
+                break
+            if chunk is None:
+                return False
+            
+            # compute available bandwidth
+            available_bandwidth = min(
+                max(0, self.bandwidth - self.network_utilization),
+                self.connections.get(source_node, 0)
+            )
+
+            if available_bandwidth <= 0:
+                #no available path/bandwidth right now
+                return False
+
         
         # Simulate network transfer time
         chunk_size_bits = chunk.size * 8  # Convert bytes to bits
-        available_bandwidth = min(
-            self.bandwidth - self.network_utilization,
-            self.connections.get(source_node, 0)
-        )
-        
-        if available_bandwidth <= 0:
-            return False
-        
-        # Calculate transfer time (in seconds)
-        transfer_time = chunk_size_bits / available_bandwidth
-        time.sleep(transfer_time)  # Simulate transfer delay
-        
-        # Update chunk status
+        transfer_time = chunk_size_bits / float(available_bandwidth)
+        # limit sleep to a small ceiling to keep simulation responsive
+        time.sleep(min(transfer_time, 0.5))
+
+        # mark chunk done
         chunk.status = TransferStatus.COMPLETED
         chunk.stored_node = self.node_id
         
         # Update metrics
-        self.network_utilization += available_bandwidth * 0.8  # Simulate some fluctuation
+        # we assume that some fraction of the bandwidth was used during the transfer
+        util_bps = available_bandwidth * 0.8
+        self.network_utilization += util_bps
         self.total_data_transferred += chunk.size
         
-        # Check if all chunks are completed
+        # Check if all chunks are completed , finalize
         if all(c.status == TransferStatus.COMPLETED for c in transfer.chunks):
             transfer.status = TransferStatus.COMPLETED
             transfer.completed_at = time.time()
+            # reserve storage for full file now
             self.used_storage += transfer.total_size
             self.stored_files[file_id] = transfer
             del self.active_transfers[file_id]
@@ -169,56 +207,58 @@ class StorageVirtualNode:
         file_id: str,
         destination_node: str
     ) -> Optional[FileTransfer]:
-        """Initiate file retrieval to another node"""
-        if file_id not in self.stored_files:
+        """Create transfer record for retrieval (copy) to another node"""
+        with self._lock:
+         if file_id not in self.stored_files:
             return None
         
         file_transfer = self.stored_files[file_id]
+        new_chunks = []
+        for c in file_transfer.chunks:
+            new_chunks.append(FileChunk(
+                chunk_id=c.chunk_id,
+                size=c.size,
+                checksum=c.checksum,
+                status=TransferStatus.PENDING
+            ))
         
         # Create a new transfer record for the retrieval
         new_transfer = FileTransfer(
-            file_id=f"retr-{file_id}-{time.time()}",
+            file_id=f"retr-{file_id}-{int(time.time())}",
             file_name=file_transfer.file_name,
             total_size=file_transfer.total_size,
-            chunks=[
-                FileChunk(
-                    chunk_id=c.chunk_id,
-                    size=c.size,
-                    checksum=c.checksum,
-                    stored_node=destination_node
-                )
-                for c in file_transfer.chunks
-            ]
+            chunks=new_chunks
         )
-        
         return new_transfer
 
-    def get_storage_utilization(self) -> Dict[str, Union[int, float, List[str]]]:
+    def get_storage_utilization(self) -> Dict[str, Union[int, float]]:
         """Get current storage utilization metrics"""
-        return {
-            "used_bytes": self.used_storage,  # int
-            "total_bytes": self.total_storage,  # int
-            "utilization_percent": (self.used_storage / self.total_storage) * 100,  # float
-            "files_stored": len(self.stored_files),  # int
-            "active_transfers": len(self.active_transfers)  # int
-            # Note: Removed list[str] since the current implementation doesn't return any lists
-        }
+        with self._lock:
+            return {
+                "used_bytes": self.used_storage,  # int
+                "total_bytes": self.total_storage,  # int
+                "utilization_percent": (self.used_storage / self.total_storage) * 100 if self.total_storage else 0.0,  # float
+                "files_stored": len(self.stored_files),  # int
+                "active_transfers": len(self.active_transfers),  # int
+                "alive": self.alive
+            }
 
     def get_network_utilization(self) -> Dict[str, Union[int, float, List[str]]]:
         """Get current network utilization metrics"""
-        total_bandwidth_bps = self.bandwidth
-        return {
+        with self._lock:
+            return {
             "current_utilization_bps": self.network_utilization,  # float
-            "max_bandwidth_bps": total_bandwidth_bps,  # int
-            "utilization_percent": (self.network_utilization / total_bandwidth_bps) * 100,  # float
+            "max_bandwidth_bps": self.bandwidth_bps,  # int
+            "utilization_percent": (self.network_utilization / self.bandwidth) * 100 if self.bandwidth else 0.0,  # float
             "connections": list(self.connections.keys())  # List[str]
         }
 
     def get_performance_metrics(self) -> Dict[str, int]:
         """Get node performance metrics"""
-        return {
-            "total_requests_processed": self.total_requests_processed,
-            "total_data_transferred_bytes": self.total_data_transferred,
-            "failed_transfers": self.failed_transfers,
-            "current_active_transfers": len(self.active_transfers)
-        }
+        with self.lock:
+            return {
+                "total_requests_processed": self.total_requests_processed,
+                "total_data_transferred_bytes": self.total_data_transferred,
+                "failed_transfers": self.failed_transfers,
+                "current_active_transfers": len(self.active_transfers)
+            }
