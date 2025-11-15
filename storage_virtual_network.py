@@ -47,14 +47,21 @@ class StorageVirtualNetwork:
             return True
         return False
     
+
+# ---------------- Transfer and replication ----------------
     def initiate_file_transfer(
         self,
         source_node_id: str,
-        target_node_id: str,
+        target_node_id: Optional[str],
         file_name: str,
-        file_size: int
+        file_size: int,
+        replication_factor: int = 2
     ) -> Optional[FileTransfer]:
-        """Initiate a file transfer between nodes"""
+        """
+        Initiate a file transfer from source node to target node.
+        If target_node_id is None, pick best node(s) automatically.
+        replication_factor defines how many replicas to create (including primary).
+        """
         if source_node_id not in self.nodes or target_node_id not in self.nodes:
             return None
             
