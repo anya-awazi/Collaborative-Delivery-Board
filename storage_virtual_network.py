@@ -1,18 +1,44 @@
 from typing import Dict, List, Optional, Tuple
 import hashlib
 import time
-from storage_virtual_node import StorageVirtualNode, FileTransfer, TransferStatus
+from storage_virtual_node import StorageVirtualNode, FileTransfer,FileChunk, TransferStatus
 from collections import defaultdict
+import random 
 
 class StorageVirtualNetwork:
     def __init__(self):
         self.nodes: Dict[str, StorageVirtualNode] = {}
+        self.nodes_by_ip: Dict[str, str] = {}
         self.transfer_operations: Dict[str, Dict[str, FileTransfer]] = defaultdict(dict)
-        
+
+     # ---------------- Node management / discovery ----------------   
     def add_node(self, node: StorageVirtualNode):
         """Add a node to the network"""
         self.nodes[node.node_id] = node
-        
+        self.nodes_by_ip[node.ip_address] = node.node_id
+
+    def remove_node(self, node_id: str):
+        if node_id in self.nodes:
+            ip = self.nodes[node_id].ip_address
+            del self.nodes[node_id]
+            if ip in self.nodes_by_ip:
+                del self.nodes_by_ip[ip]   
+
+    def discover_nodes(self) -> List[Dict]:
+        """Return a list of node metadata (discovery)."""
+        return [
+            {
+                "node_id": n.node_id,
+                "ip": n.ip_address,
+                "alive": n.alive,
+                "storage_total": n.total_storage,
+                "storage_used": n.used_storage
+            }
+            for n in self.nodes.values()
+        ] 
+    
+    
+    # ---------------- Connectivity ----------------    
     def connect_nodes(self, node1_id: str, node2_id: str, bandwidth: int):
         """Connect two nodes with specified bandwidth"""
         if node1_id in self.nodes and node2_id in self.nodes:
