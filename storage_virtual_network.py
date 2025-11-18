@@ -151,4 +151,92 @@ class StorageVirtualNetwork:
             # fallback: find any node that has the file in its active transfers
             replication_target_ids = [nid for nid, n in self.nodes.items() if file_id in n.active_transfers]
 
-    
+     # iterate over each chunk and try to send it to all replication targets (one replica finished is ok)
+        for chunk in transfer.chunks:
+            if chunk.status == TransferStatus.COMPLETED:
+                continue
+
+            if chunks_transferred >= chunks_per_step:
+                break
+
+            # try each replication target in order until one accepts
+            success = False
+            tried_nodes = []
+            for target_id in replication_target_ids:
+                tried_nodes.append(target_id)
+                if target_id not in self.nodes:
+                    continue
+                target_node = self.nodes[target_id]
+                # simulate transfer to target
+                res = target_node.process_chunk_transfer(file_id=file_id, chunk_id=chunk.chunk_id, source_node=source_node_id)
+                if res:
+                    # success, mark chunk as completed locally too
+                    chunk.status = TransferStatus.COMPLETED
+                    chunk.stored_node = target_node.node_id
+                    chunks_transferred += 1
+                    success = True
+                    break
+                else:
+                    # if target_node failed or could not accept chunk, try alternate
+                    # attempt reroute: look for another node with capacity
+                    alt = self._find_alternate_node_for_chunk(excluded_node_ids=tried_nodes + [source_node_id], file_size=chunk.size)
+                    if alt:
+                        # register transfer reservation on alt if needed
+                        alt_tr = alt.initiate_file_transfer(file_id=file_id, file_name=transfer.file_name, file_size=transfer.total_size, source_node=source_node_id, replication_targets=replication_target_ids)
+                        if alt_tr:
+                            # add alt to replication targets so next iteration tries it directly
+                            replication_target_ids.append(alt.node_id)
+                            self.nodes[target_id] = target_node  # no-op but ensure presence
+                            # attempt to send to alt
+                            res2 = alt.process_chunk_transfer(file_id=file_id, chunk_id=chunk.chunk_id, source_node=source_node_id)
+                            if res2:
+                                chunk.status = TransferStatus.COMPLETED
+                                chunk.stored_node = alt.node_id
+                                chunks_transferred += 1
+                                success = True
+                                break
+                            else:
+                                # alt failed too; continue searching
+                                continue
+                        else:
+                            continue
+                    else:
+                        continue
+
+            if not success:
+                # we could not transfer this chunk in this step
+                # don't mark it failed globally yet; allow retries in next call
+                continue
+
+        # after processing, check transfer completion: all chunks marked completed
+        if all(c.status == TransferStatus.COMPLETED for c in transfer.chunks):
+            transfer.status = TransferStatus.COMPLETED
+            transfer.completed_at = time.time()
+            # update network-wide bookkeeping: increase used storage on nodes which stored the file
+            for n in self.nodes.values():
+                if file_id in n.stored_files:
+                    # node already accounted for used storage
+                    continue
+            # remove from transfer_operations
+            if file_id in self.transfer_operations[source_node_id]:
+                del self.transfer_operations[source_node_id][file_id]
+            return (chunks_transferred, True)
+
+        return (chunks_transferred, False)
+
+    def get_network_stats(self) -> Dict[str, float]:
+        total_bandwidth = sum(n.bandwidth for n in self.nodes.values())
+        used_bandwidth = sum(n.network_utilization for n in self.nodes.values())
+        total_storage = sum(n.total_storage for n in self.nodes.values())
+        used_storage = sum(n.used_storage for n in self.nodes.values())
+
+        return {
+            "total_nodes": len(self.nodes),
+            "total_bandwidth_bps": total_bandwidth,
+            "used_bandwidth_bps": used_bandwidth,
+            "bandwidth_utilization": (used_bandwidth / total_bandwidth) * 100 if total_bandwidth else 0.0,
+            "total_storage_bytes": total_storage,
+            "used_storage_bytes": used_storage,
+            "storage_utilization": (used_storage / total_storage) * 100 if total_storage else 0.0,
+            "active_transfers": sum(len(t) for t in self.transfer_operations.values())
+        }
