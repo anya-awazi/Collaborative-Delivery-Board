@@ -1,11 +1,15 @@
 # app.py
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request,render_template
 from storage_virtual_network import StorageVirtualNetwork
 from storage_virtual_node import StorageVirtualNode
+from flask_cors import CORS
+
+
 import threading
 import time
 
 app = Flask(__name__)
+CORS(app)
 
 # In-memory network instance (for demo / local)
 network = StorageVirtualNetwork()
@@ -20,6 +24,32 @@ def ensure_example_nodes():
         network.connect_nodes("node1", "node2", bandwidth_mbps=1000)
 
 ensure_example_nodes()
+
+# Dashboard homepage
+@app.route("/")
+def dashboard():
+    return render_template("dashboard.html")
+
+# API to get all nodes and their metrics
+@app.route("/api/nodes", methods=["GET"])
+def api_nodes():
+    data = []
+    for node in network.nodes.values():
+        data.append({
+            "node_id": node.node_id,
+            "ip": node.ip_address,
+            "alive": node.alive,
+            "storage_used": node.used_storage,
+            "storage_total": node.total_storage,
+            "connections": list(node.connections.keys()),
+            "active_transfers": len(node.active_transfers)
+        })
+    return jsonify(data)
+
+# API to get network stats
+@app.route("/api/network_stats", methods=["GET"])
+def api_network_stats():
+    return jsonify(network.get_network_stats())
 
 @app.route("/nodes", methods=["GET"])
 def list_nodes():
@@ -42,28 +72,28 @@ def discover():
 @app.route("/stats", methods=["GET"])
 def stats():
     return jsonify(network.get_network_stats())
-
 @app.route("/initiate", methods=["POST"])
 def initiate():
-    """
-    POST JSON:
-    {
-      "source_node_id": "node1",
-      "target_node_id": "node2",    # optional
-      "file_name": "file.zip",
-      "file_size": 104857600,       # bytes
-      "replication_factor": 2
-    }
-    """
-    payload = request.json
-    source = payload.get("source_node_id")
-    target = payload.get("target_node_id")
-    fname = payload.get("file_name")
-    fsize = payload.get("file_size")
+
+    payload = request.get_json(silent=True) or {}
+
+    source = payload.get("source_node_id", "node1")
+    target = payload.get("target_node_id", "node2")
+    fname = payload.get("file_name", "default_file.zip")
+    fsize = int(payload.get("file_size", 1048576))   # 1MB default
     rf = int(payload.get("replication_factor", 2))
-    tr = network.initiate_file_transfer(source_node_id=source, target_node_id=target, file_name=fname, file_size=int(fsize), replication_factor=rf)
+
+    tr = network.initiate_file_transfer(
+        source_node_id=source,
+        target_node_id=target,
+        file_name=fname,
+        file_size=fsize,
+        replication_factor=rf
+    )
+
     if not tr:
-        return jsonify({"error": "could not initiate transfer (no capacity/targets)"}), 400
+        return jsonify({"error": "could not initiate transfer"}), 400
+
     return jsonify({
         "file_id": tr.file_id,
         "file_name": tr.file_name,
@@ -71,6 +101,7 @@ def initiate():
         "chunks": len(tr.chunks),
         "status": tr.status.name
     })
+
 
 @app.route("/process_step", methods=["POST"])
 def process_step():
