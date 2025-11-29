@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package cloudsecurity;
+
+service UserService {
+  rpc Login(LoginRequest) returns (LoginReply);
+  rpc VerifyOTP(VerifyRequest) returns (VerifyReply);
+}
+
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message LoginReply {
+  string status = 1;  // "OTP_SENT", "UNAUTHORIZED"
+}
+
+message VerifyRequest {
+  string username = 1;
+  string otp = 2;
+}
+
+message VerifyReply {
+  string status = 1; // "OTP_VALID", "OTP_INVALID"
+}
