@@ -1,0 +1,98 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Collaborative Storage - Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    .top { display:flex; justify-content:space-between; align-items:center; }
+    .btn { padding:6px 12px; background:#1976d2; color:white; border-radius:4px; text-decoration:none; }
+    table{ width:100%; border-collapse:collapse; margin-top:12px; }
+    th,td{ border:1px solid #ddd; padding:8px; }
+    th{ background:#f4f4f4; }
+    #nodes { margin-top:16px; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <h1>Distributed Storage Dashboard</h1>
+    <div>
+      <input id="fileInput" type="file">
+      <button id="uploadBtn" class="btn">Upload</button>
+      <button id="processBtn" class="btn" onclick="processStep()">Process Step</button>
+    </div>
+  </div>
+
+  <div id="status" style="margin-top:12px;"></div>
+
+  <h2>Files</h2>
+  <table id="filesTable">
+    <thead><tr><th>File ID</th><th>Name</th><th>Size</th><th>Actions</th><th>Status</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <h2 id="nodesTitle">Nodes</h2>
+  <table id="nodes">
+    <thead><tr><th>Node ID</th><th>IP</th><th>Alive</th><th>Used / Total</th><th>Connections</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+<script>
+async function fetchNodes(){
+  const res = await fetch('/api/nodes');
+  const data = await res.json();
+  const tbody = document.querySelector('#nodes tbody'); tbody.innerHTML = '';
+  data.forEach(n => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${n.node_id}</td><td>${n.ip}</td><td>${n.alive}</td><td>${n.storage_used} / ${n.storage_total}</td><td>${n.connections.join(', ')}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function fetchFiles(){
+  // we don't have a list endpoint; infer from UI FILES state by calling /api/network_stats to show active transfers
+  // For simplicity we will show the FILES that backend knows (not provided via endpoint); add endpoint if you need
+  const resStats = await fetch('/api/network_stats');
+  const stats = await resStats.json();
+  document.getElementById('status').textContent = `Nodes: ${stats.total_nodes} | Active transfers: ${stats.active_transfers}`;
+}
+
+document.getElementById('uploadBtn').addEventListener('click', async ()=>{
+  const input = document.getElementById('fileInput');
+  if(!input.files.length) return alert('pick a file');
+  const f = input.files[0];
+  const form = new FormData();
+  form.append('file', f);
+  form.append('replication', 2);
+  const r = await fetch('/api/upload', { method:'POST', body: form });
+  const j = await r.json();
+  if(j.error){
+    alert('Upload error: ' + j.error);
+  } else {
+    alert('Upload initiated: ' + j.file_id);
+  }
+  fetchNodes();
+});
+
+async function processStep(){
+  const fid = prompt('File id to process (leave empty to attempt all transfers):');
+  if(!fid) {
+    // attempt to process all transfers once by asking server to iterate over stored ops - not implemented; instead call for a known source
+    const source = 'node1';
+    const res = await fetch('/api/process_step', {method:'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({source_node_id: source, chunks_per_step: 3, file_id: ""})});
+    alert('Process step called (check logs).');
+    return;
+  }
+  const source = 'node1';
+  const res = await fetch('/api/process_step', {method:'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({source_node_id: source, file_id: fid, chunks_per_step: 3})});
+  const j = await res.json();
+  alert('Transferred: ' + j.transferred + ' completed: ' + j.completed);
+  fetchNodes();
+}
+
+fetchNodes();
+fetchFiles();
+setInterval(fetchNodes, 4000);
+</script>
+</body>
+</html>
