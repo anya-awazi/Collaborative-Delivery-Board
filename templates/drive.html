@@ -1,98 +1,57 @@
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Collaborative Storage - Dashboard</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 20px; }
-    .top { display:flex; justify-content:space-between; align-items:center; }
-    .btn { padding:6px 12px; background:#1976d2; color:white; border-radius:4px; text-decoration:none; }
-    table{ width:100%; border-collapse:collapse; margin-top:12px; }
-    th,td{ border:1px solid #ddd; padding:8px; }
-    th{ background:#f4f4f4; }
-    #nodes { margin-top:16px; }
-  </style>
-</head>
-<body>
-  <div class="top">
-    <h1>Distributed Storage Dashboard</h1>
-    <div>
-      <input id="fileInput" type="file">
-      <button id="uploadBtn" class="btn">Upload</button>
-      <button id="processBtn" class="btn" onclick="processStep()">Process Step</button>
-    </div>
-  </div>
+{% extends "base.html" %}
+{% block body %}
+<h2>My Drive</h2>
+<div>
+  <strong>Storage used:</strong> <span id="storageUsed">...</span>
+</div>
+<div style="margin-top:10px">
+  <input type="file" id="fileInput"> <button id="uploadBtn" class="btn">Upload</button>
+  <select id="replication"><option value="2">Replication 2</option><option value="3">Replication 3</option></select>
+</div>
 
-  <div id="status" style="margin-top:12px;"></div>
-
-  <h2>Files</h2>
-  <table id="filesTable">
-    <thead><tr><th>File ID</th><th>Name</th><th>Size</th><th>Actions</th><th>Status</th></tr></thead>
-    <tbody></tbody>
-  </table>
-
-  <h2 id="nodesTitle">Nodes</h2>
-  <table id="nodes">
-    <thead><tr><th>Node ID</th><th>IP</th><th>Alive</th><th>Used / Total</th><th>Connections</th></tr></thead>
-    <tbody></tbody>
-  </table>
+<table id="files" style="width:100%;margin-top:12px;border-collapse:collapse">
+  <thead><tr><th>File</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead>
+  <tbody></tbody>
+</table>
 
 <script>
-async function fetchNodes(){
-  const res = await fetch('/api/nodes');
-  const data = await res.json();
-  const tbody = document.querySelector('#nodes tbody'); tbody.innerHTML = '';
-  data.forEach(n => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${n.node_id}</td><td>${n.ip}</td><td>${n.alive}</td><td>${n.storage_used} / ${n.storage_total}</td><td>${n.connections.join(', ')}</td>`;
+async function refreshFiles(){
+  const res = await fetch('/api/files');
+  if(res.status!==200){ document.querySelector('#files tbody').innerHTML='<tr><td colspan="4">Auth required</td></tr>'; return; }
+  const j = await res.json();
+  document.getElementById('storageUsed').textContent = (j.used/1024/1024).toFixed(2) + ' MB of ' + (j.allowed/1024/1024).toFixed(2) + ' MB';
+  const tbody = document.querySelector('#files tbody'); tbody.innerHTML='';
+  j.files.forEach(f=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML = `<td>${f.file_name}</td><td>${(f.size/1024).toFixed(2)} KB</td><td id="s-${f.network_id}">Checking...</td>
+      <td>
+        <button onclick="download('${f.network_id}')" class="btn">Download</button>
+        <button onclick="del('${f.network_id}')" style="background:#c62828" class="btn">Delete</button>
+      </td>`;
     tbody.appendChild(tr);
+    // check status
+    (async ()=>{
+      const st = await fetch('/api/file_status/'+f.network_id).then(r=>r.json());
+      document.getElementById('s-'+f.network_id).textContent = st.status + (st.chunks_done? ` (${st.chunks_done}/${st.chunks_total})`:'');
+    })();
   });
 }
 
-async function fetchFiles(){
-  // we don't have a list endpoint; infer from UI FILES state by calling /api/network_stats to show active transfers
-  // For simplicity we will show the FILES that backend knows (not provided via endpoint); add endpoint if you need
-  const resStats = await fetch('/api/network_stats');
-  const stats = await resStats.json();
-  document.getElementById('status').textContent = `Nodes: ${stats.total_nodes} | Active transfers: ${stats.active_transfers}`;
-}
-
 document.getElementById('uploadBtn').addEventListener('click', async ()=>{
-  const input = document.getElementById('fileInput');
-  if(!input.files.length) return alert('pick a file');
-  const f = input.files[0];
-  const form = new FormData();
-  form.append('file', f);
-  form.append('replication', 2);
-  const r = await fetch('/api/upload', { method:'POST', body: form });
-  const j = await r.json();
-  if(j.error){
-    alert('Upload error: ' + j.error);
-  } else {
-    alert('Upload initiated: ' + j.file_id);
-  }
-  fetchNodes();
+  const input=document.getElementById('fileInput'); if(!input.files.length) return alert('choose file');
+  const file = input.files[0]; const form = new FormData();
+  form.append('file', file); form.append('replication', document.getElementById('replication').value);
+  const res = await fetch('/api/upload', {method:'POST', body: form});
+  const j = await res.json();
+  if(j.error){ alert('Error: '+j.error); return; }
+  alert('Upload initiated: '+j.file_id);
+  setTimeout(refreshFiles, 1000);
 });
 
-async function processStep(){
-  const fid = prompt('File id to process (leave empty to attempt all transfers):');
-  if(!fid) {
-    // attempt to process all transfers once by asking server to iterate over stored ops - not implemented; instead call for a known source
-    const source = 'node1';
-    const res = await fetch('/api/process_step', {method:'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({source_node_id: source, chunks_per_step: 3, file_id: ""})});
-    alert('Process step called (check logs).');
-    return;
-  }
-  const source = 'node1';
-  const res = await fetch('/api/process_step', {method:'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({source_node_id: source, file_id: fid, chunks_per_step: 3})});
-  const j = await res.json();
-  alert('Transferred: ' + j.transferred + ' completed: ' + j.completed);
-  fetchNodes();
-}
+async function download(id){ location.href='/api/download/'+id; }
+async function del(id){ if(!confirm('Delete?')) return; await fetch('/api/delete/'+id,{method:'POST'}); refreshFiles(); }
 
-fetchNodes();
-fetchFiles();
-setInterval(fetchNodes, 4000);
+refreshFiles();
+setInterval(refreshFiles, 5000);
 </script>
-</body>
-</html>
+{% endblock %}

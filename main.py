@@ -7,6 +7,7 @@ import time
 
 from storage_virtual_network import StorageVirtualNetwork
 from storage_virtual_node import StorageVirtualNode
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__, template_folder="templates")
 CORS(app)
@@ -33,6 +34,122 @@ def ensure_example_nodes():
         network.connect_nodes("node1", "node3", bandwidth_mbps=400)
 
 ensure_example_nodes()
+
+# -------------------------------
+# User storage folder
+# -------------------------------
+UPLOAD_FOLDER = "user_storage"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+
+# Temporary in-memory user storage DB 
+user_storage = {
+    # "alice@example.com": {
+    #    "quota": 2GB,
+    #    "used": 0,
+    #    "files": [
+    #        {name, size, path}
+    #    ]
+    # }
+}
+
+def get_user_storage(email):
+    if email not in user_storage:
+        user_storage[email] = {
+            "quota": USER_DEFAULT_QUOTA,
+            "used": 0,
+            "files": []
+        }
+    return user_storage[email]
+
+
+# Each user gets 2GB = 2 * 1024 * 1024 * 1024 bytes
+USER_DEFAULT_QUOTA = 2 * 1024 * 1024 * 1024
+
+# -------------------------
+# Upload route
+# -------------------------
+@app.route("/upload", methods=["POST"])
+def upload_file():
+    email = request.form.get("email")
+    user = get_user_storage(email)
+
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+
+    file = request.files["file"]
+    filename = secure_filename(file.filename)
+
+    size = len(file.read())
+    file.seek(0)
+
+    # Check quota
+    if user["used"] + size > user["quota"]:
+        return jsonify({"error": "Storage limit exceeded"}), 403
+
+    # Save file to local storage
+    save_path = os.path.join(UPLOAD_FOLDER, filename)
+    file.save(save_path)
+
+    # Update user record
+    user["used"] += size
+    user["files"].append({
+        "name": filename,
+        "size": size,
+        "path": save_path
+    })
+
+    return jsonify({
+        "status": "uploaded",
+        "file": filename,
+        "size": size,
+        "storage_used": user["used"],
+        "storage_left": user["quota"] - user["used"]
+    })
+
+
+@app.route("/files/<email>", methods=["GET"])
+def list_user_files(email):
+    user = get_user_storage(email)
+    return jsonify({
+        "files": user["files"],
+        "storage_used": user["used"],
+        "storage_left": user["quota"] - user["used"]
+    })
+
+
+from flask import send_file
+
+@app.route("/download/<email>/<filename>", methods=["GET"])
+def download_file(email, filename):
+    user = get_user_storage(email)
+
+    for f in user["files"]:
+        if f["name"] == filename:
+            return send_file(f["path"], as_attachment=True)
+
+    return jsonify({"error": "File not found"}), 404
+
+
+
+@app.route("/delete_file", methods=["POST"])
+def delete_file():
+    data = request.json
+    email = data.get("email")
+    filename = data.get("filename")
+
+    user = get_user_storage(email)
+
+    for f in user["files"]:
+        if f["name"] == filename:
+            os.remove(f["path"])
+            user["used"] -= f["size"]
+            user["files"].remove(f)
+            return jsonify({"status": "deleted"})
+
+    return jsonify({"error": "File not found"}), 404
+
 
 # -------------------------
 # Local storage for uploaded bytes (so downloads work)

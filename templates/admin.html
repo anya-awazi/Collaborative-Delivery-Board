@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block body %}
+<h2>Admin Dashboard</h2>
+<h3>Network Stats</h3>
+<pre>{{ network_stats|tojson(indent=2) }}</pre>
+
+<h3>Users</h3>
+<table><thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Extra Quota (bytes)</th><th>Actions</th></tr></thead>
+<tbody>
+{% for u in users %}
+<tr><td>{{u.id}}</td><td>{{u.username}}</td><td>{{u.email}}</td><td>{{u.extra_quota}}</td>
+<td>
+  <form method="post" action="{{ url_for('admin_add_quota') }}">
+    <input type="hidden" name="user_id" value="{{u.id}}">
+    <input name="add_bytes" placeholder="bytes">
+    <button type="submit" class="btn">Add Quota</button>
+  </form>
+</td></tr>
+{% endfor %}
+</tbody></table>
+{% endblock %}
