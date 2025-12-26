@@ -1,0 +1,163 @@
+syntax = "proto3";
+
+package cloudsim;
+
+// User-related messages
+message User {
+  string id = 1;
+  string username = 2;
+  string email = 3;
+  int64 storage_quota = 4;  // in bytes
+  int64 used_storage = 5;   // in bytes
+}
+
+// Authentication messages
+message RegisterRequest {
+  string username = 1;
+  string email = 2;
+  string password = 3;
+}
+
+message RegisterResponse {
+  bool success = 1;
+  string message = 2;
+  string user_id = 3;
+}
+
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  bool success = 1;
+  string message = 2;
+  string session_token = 3;
+  bool requires_otp = 4;
+}
+
+message OTPRequest {
+  string username = 1;
+  string otp = 2;
+  string session_token = 3;
+}
+
+message OTPResponse {
+  bool success = 1;
+  string message = 2;
+  string auth_token = 3;
+}
+
+// File operations
+message FileMetadata {
+  string id = 1;
+  string filename = 2;
+  string path = 3;
+  int64 size = 4;
+  string created_at = 5;
+  string modified_at = 6;
+  string checksum = 7;
+  map<string, string> custom_metadata = 8;
+}
+
+message UploadRequest {
+  oneof data {
+    FileMetadata metadata = 1;
+    bytes chunk = 2;
+  };
+  string auth_token = 3;
+}
+
+message UploadResponse {
+  bool success = 1;
+  string message = 2;
+  string file_id = 3;
+}
+
+message DownloadRequest {
+  string file_id = 1;
+  string auth_token = 2;
+}
+
+message DownloadResponse {
+  oneof data {
+    FileMetadata metadata = 1;
+    bytes chunk = 2;
+  };
+}
+
+message ListFilesRequest {
+  string path = 1;
+  string auth_token = 2;
+}
+
+message ListFilesResponse {
+  repeated FileMetadata files = 1;
+  repeated string directories = 2;
+  string current_path = 3;
+}
+
+message DeleteRequest {
+  string file_id = 1;
+  string auth_token = 2;
+}
+
+message DeleteResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// Storage management
+message StorageInfo {
+  int64 total_space = 1;  // in bytes
+  int64 used_space = 2;   // in bytes
+  int64 free_space = 3;   // in bytes
+}
+
+message StorageInfoRequest {
+  string auth_token = 1;
+}
+
+// Virtual disk management
+message VirtualDiskInfo {
+  string id = 1;
+  string name = 2;
+  int64 size = 3;  // in bytes
+  string created_at = 4;
+  string mount_point = 5;
+  bool is_mounted = 6;
+}
+
+message CreateVirtualDiskRequest {
+  string name = 1;
+  int64 size = 2;  // in bytes
+  string auth_token = 3;
+}
+
+message MountVirtualDiskRequest {
+  string disk_id = 1;
+  string mount_point = 2;
+  string auth_token = 3;
+}
+
+// Main service definition
+service CloudSimService {
+  // User Authentication
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Login(LoginRequest) returns (LoginResponse);
+  rpc VerifyOTP(OTPRequest) returns (OTPResponse);
+  
+  // File Operations
+  rpc UploadFile(stream UploadRequest) returns (UploadResponse);
+  rpc DownloadFile(DownloadRequest) returns (stream DownloadResponse);
+  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
+  rpc DeleteFile(DeleteRequest) returns (DeleteResponse);
+  
+  // Storage Management
+  rpc GetStorageInfo(StorageInfoRequest) returns (StorageInfo);
+  
+  // Virtual Disk Management
+  rpc CreateVirtualDisk(CreateVirtualDiskRequest) returns (VirtualDiskInfo);
+  rpc MountVirtualDisk(MountVirtualDiskRequest) returns (VirtualDiskInfo);
+  rpc ListVirtualDisks(StorageInfoRequest) returns (stream VirtualDiskInfo);
+}
